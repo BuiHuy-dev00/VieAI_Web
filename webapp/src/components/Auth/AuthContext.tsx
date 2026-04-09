@@ -26,7 +26,11 @@ type AuthSuccess = {
 };
 
 type RefreshResponse = { accessToken: string; refreshToken: string };
-type ApiError = { message?: string; statusCode?: number };
+type ApiErrorBody = { success?: false; error?: { message?: string }; message?: string };
+
+function apiErrorMessage(json: ApiErrorBody | null, fallback: string): string {
+    return json?.error?.message ?? json?.message ?? fallback;
+}
 
 type AuthContextValue = {
     user: any;
@@ -56,9 +60,9 @@ async function refreshTokensOrThrow(): Promise<RefreshResponse> {
             body: JSON.stringify({ refreshToken }),
         })
             .then(async (res) => {
-                const json = (await res.json().catch(() => null)) as RefreshResponse | ApiError | null;
+                const json = (await res.json().catch(() => null)) as RefreshResponse | ApiErrorBody | null;
                 if (!res.ok) {
-                    throw new Error((json as ApiError | null)?.message ?? `Refresh failed (${res.status})`);
+                    throw new Error(apiErrorMessage(json, `Không làm mới phiên đăng nhập (${res.status})`));
                 }
                 return json as RefreshResponse;
             })
@@ -174,10 +178,10 @@ export const AuthProvider: FC<PropsWithChildren<{}>> = ({ children }) => {
                 body: JSON.stringify({ email, password }),
             });
 
-            const json = (await res.json().catch(() => null)) as AuthSuccess | ApiError | null;
+            const json = (await res.json().catch(() => null)) as AuthSuccess | ApiErrorBody | null;
 
             if (!res.ok) {
-                throw new Error((json as ApiError | null)?.message ?? `Login failed (${res.status})`);
+                throw new Error(apiErrorMessage(json, `Đăng nhập thất bại (${res.status})`));
             }
 
             const success = json as AuthSuccess;

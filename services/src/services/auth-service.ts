@@ -200,14 +200,14 @@ export async function login(
   );
 
   if (!user) {
-    const error = new Error('Invalid email or password');
+    const error = new Error('Email chưa được đăng ký hoặc không tồn tại');
     (error as any).statusCode = 401;
     throw error;
   }
 
   // Check if user has password (not OAuth-only)
   if (!user.password_hash) {
-    const error = new Error('Please login with Google');
+    const error = new Error('Vui lòng đăng nhập bằng Google');
     (error as any).statusCode = 401;
     throw error;
   }
@@ -215,7 +215,7 @@ export async function login(
   // Verify password
   const valid = await comparePassword(password, user.password_hash);
   if (!valid) {
-    const error = new Error('Invalid email or password');
+    const error = new Error('Mật khẩu không đúng');
     (error as any).statusCode = 401;
     throw error;
   }

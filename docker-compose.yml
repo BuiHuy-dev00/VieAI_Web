@@ -4,7 +4,6 @@ services:
       context: ./webapp
       dockerfile: Dockerfile
       args:
-        #VITE_APP_API_URL: https://vieai.interservant.dev        # Browser on your PC calls this URL; use localhost when API runs on host :3000
         VITE_APP_API_URL: http://localhost:3000
     ports:
       - "5173:8080"
@@ -17,13 +16,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
-    # Biến SePay (SEPAY_*) chỉ khai báo trong file .env này — KHÔNG thêm vào environment: bên dưới,
-    # vì Docker Compose sẽ ghi đè env_file bằng ${VAR:-} rỗng khi host không có biến đó lúc `docker compose up`.
-    # OPENAI: đặt trong .env gốc hoặc services/.env. Thứ tự: services trước, .env sau → .env gốc ghi đè (tránh services/.env có OPENAI= rỗng làm mất key).
-    # Admin: ADMIN_EMAIL, ADMIN_PASSWORD (và tuỳ chọn ADMIN_NAME) trong .env gốc — backend đồng bộ user admin khi start.
-    env_file:
-      - path: services/.env
-        required: false
+  env_file:
+      - services/.env
       - .env
     environment:
       NODE_ENV: production

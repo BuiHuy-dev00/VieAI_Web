@@ -1,2 +1,0 @@
-Email: admin@localhost
-Mật khẩu: Admin123!
