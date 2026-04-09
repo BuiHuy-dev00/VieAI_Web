@@ -1,0 +1,78 @@
+services:
+  webapp:
+    build:
+      context: ./webapp
+      dockerfile: Dockerfile
+      args:
+        #VITE_APP_API_URL: https://vieai.interservant.dev        # Browser on your PC calls this URL; use localhost when API runs on host :3000
+        VITE_APP_API_URL: http://localhost:3000
+    ports:
+      - "5173:8080"
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    # Biến SePay (SEPAY_*) chỉ khai báo trong file .env này — KHÔNG thêm vào environment: bên dưới,
+    # vì Docker Compose sẽ ghi đè env_file bằng ${VAR:-} rỗng khi host không có biến đó lúc `docker compose up`.
+    # OPENAI: đặt trong .env gốc hoặc services/.env. Thứ tự: services trước, .env sau → .env gốc ghi đè (tránh services/.env có OPENAI= rỗng làm mất key).
+    # Admin: ADMIN_EMAIL, ADMIN_PASSWORD (và tuỳ chọn ADMIN_NAME) trong .env gốc — backend đồng bộ user admin khi start.
+    env_file:
+      - path: services/.env
+        required: false
+      - .env
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: chat_db
+      JWT_ACCESS_EXPIRES: 24h
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: always
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chat_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Migration service - run manually when needed
+  migrate:
+    image: postgres:16-alpine
+    profiles:
+      - tools
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: chat_db
+    volumes:
+      - ./services/db:/db
+    entrypoint: ["sh", "-c", "psql -f /db/init.sql"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    driver: local

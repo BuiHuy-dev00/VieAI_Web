@@ -1,0 +1,996 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: services/src/**/*.ts, services/db/**/*.sql, services/package.json, services/Dockerfile, services/docker-compose.yml, .env.example, README.md
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+services/
+  db/
+    init.sql
+  src/
+    config/
+      db.ts
+    controllers/
+      chat-controller.ts
+      image-controller.ts
+    middleware/
+      error-handler.ts
+    routes/
+      chat-routes.ts
+      image-routes.ts
+    services/
+      gemini-service.ts
+    server.ts
+  Dockerfile
+  package.json
+.env.example
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="services/db/init.sql">
+-- Users table
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(100) UNIQUE NOT NULL,
+  password_hash VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Chat Sessions
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  title VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Messages
+CREATE TABLE IF NOT EXISTS messages (
+  id SERIAL PRIMARY KEY,
+  session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role VARCHAR(20) NOT NULL,
+  content TEXT NOT NULL,
+  tokens_used INTEGER,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Generated Images
+CREATE TABLE IF NOT EXISTS images (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  prompt TEXT NOT NULL,
+  image_url TEXT,
+  storage_path VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON chat_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_images_session ON images(session_id);
+
+-- Insert default user for testing
+INSERT INTO users (email, password_hash) VALUES ('test@example.com', 'test_hash') ON CONFLICT DO NOTHING;
+</file>
+
+<file path="services/src/config/db.ts">
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  database: process.env.DB_NAME || 'chat_db',
+});
+
+export async function initDb(): Promise<void> {
+  try {
+    const client = await pool.connect();
+    console.log('Database connected successfully');
+    client.release();
+  } catch (error) {
+    console.error('Database connection failed:', error);
+    throw error;
+  }
+}
+
+export async function query<T>(text: string, params?: unknown[]): Promise<T[]> {
+  const result = await pool.query(text, params);
+  return result.rows as T[];
+}
+
+export async function queryOne<T>(text: string, params?: unknown[]): Promise<T | null> {
+  const result = await pool.query(text, params);
+  return (result.rows[0] as T) || null;
+}
+
+export { pool };
+</file>
+
+<file path="services/src/controllers/chat-controller.ts">
+import { Request, Response, NextFunction } from 'express';
+import { v4 as uuidv4 } from 'uuid';
+import { query, queryOne } from '../config/db';
+import {
+  sendMessageStream,
+  sendMessageWithImage,
+  clearChatSession,
+  ChatMessage,
+  GeneratedImage
+} from '../services/gemini-service';
+import { createError } from '../middleware/error-handler';
+
+interface Session {
+  id: string;
+  user_id: number;
+  title: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface Message {
+  id: number;
+  session_id: string;
+  role: string;
+  content: string;
+  image_data?: string;
+  tokens_used: number;
+  created_at: Date;
+}
+
+/**
+ * Save image to database
+ */
+async function saveImage(sessionId: string, prompt: string, image: GeneratedImage): Promise<string> {
+  const id = uuidv4();
+  await query(
+    `INSERT INTO images (id, session_id, prompt, image_url) VALUES ($1, $2, $3, $4)`,
+    [id, sessionId, prompt, `data:${image.mimeType};base64,${image.data}`]
+  );
+  return id;
+}
+
+/**
+ * Create new chat session
+ */
+export async function createSession(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId = 1, title = 'New Chat' } = req.body;
+    const id = uuidv4();
+
+    await query(
+      'INSERT INTO chat_sessions (id, user_id, title) VALUES ($1, $2, $3)',
+      [id, userId, title]
+    );
+
+    const session = await queryOne<Session>(
+      'SELECT * FROM chat_sessions WHERE id = $1',
+      [id]
+    );
+
+    res.status(201).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Get session with messages
+ */
+export async function getSession(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+
+    const session = await queryOne<Session>(
+      'SELECT * FROM chat_sessions WHERE id = $1',
+      [id]
+    );
+
+    if (!session) {
+      throw createError('Session not found', 404);
+    }
+
+    const messages = await query<Message>(
+      'SELECT * FROM messages WHERE session_id = $1 ORDER BY created_at ASC',
+      [id]
+    );
+
+    // Get images for this session
+    const images = await query<{ id: string; prompt: string; image_url: string }>(
+      'SELECT id, prompt, image_url FROM images WHERE session_id = $1',
+      [id]
+    );
+
+    res.json({ success: true, data: { ...session, messages, images } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Send message with streaming response + image generation
+ */
+export async function sendMessageHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+    const { message, stream = true } = req.body;
+
+    if (!message) {
+      throw createError('Message is required', 400);
+    }
+
+    // Verify session exists
+    const session = await queryOne<Session>(
+      'SELECT * FROM chat_sessions WHERE id = $1',
+      [id]
+    );
+
+    if (!session) {
+      throw createError('Session not found', 404);
+    }
+
+    // Get chat history for context
+    const dbMessages = await query<Message>(
+      'SELECT role, content FROM messages WHERE session_id = $1 ORDER BY created_at ASC',
+      [id]
+    );
+
+    const history: ChatMessage[] = dbMessages.map(m => ({
+      role: m.role === 'user' ? 'user' : 'model',
+      parts: [{ text: m.content }]
+    }));
+
+    // Save user message
+    await query(
+      'INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3)',
+      [id, 'user', message]
+    );
+
+    if (stream) {
+      // Streaming response with image support
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      let fullResponse = '';
+      let generatedImageId: string | null = null;
+      const generator = sendMessageStream(id, message, history);
+
+      for await (const chunk of generator) {
+        // Handle image chunk
+        if (chunk.image) {
+          generatedImageId = await saveImage(id, message, chunk.image);
+          res.write(`data: ${JSON.stringify({
+            type: 'image',
+            imageId: generatedImageId,
+            imageUrl: `data:${chunk.image.mimeType};base64,${chunk.image.data}`
+          })}\n\n`);
+        }
+
+        // Handle text chunk
+        if (chunk.text) {
+          fullResponse += chunk.text;
+          res.write(`data: ${JSON.stringify({ type: 'text', text: chunk.text, done: false })}\n\n`);
+        }
+
+        if (chunk.done) {
+          res.write(`data: ${JSON.stringify({ type: 'done', done: true })}\n\n`);
+        }
+      }
+
+      // Save assistant response
+      await query(
+        'INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3)',
+        [id, 'assistant', fullResponse]
+      );
+
+      // Update session timestamp
+      await query(
+        'UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1',
+        [id]
+      );
+
+      res.end();
+    } else {
+      // Non-streaming response with image support
+      const response = await sendMessageWithImage(id, message, history);
+
+      let imageId: string | null = null;
+      let imageUrl: string | null = null;
+
+      // Save image if generated
+      if (response.image) {
+        imageId = await saveImage(id, message, response.image);
+        imageUrl = `data:${response.image.mimeType};base64,${response.image.data}`;
+      }
+
+      // Save assistant response
+      await query(
+        'INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3)',
+        [id, 'assistant', response.text]
+      );
+
+      // Update session timestamp
+      await query(
+        'UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1',
+        [id]
+      );
+
+      res.json({
+        success: true,
+        data: {
+          response: response.text,
+          ...(imageId && { imageId, imageUrl })
+        }
+      });
+    }
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Delete session
+ */
+export async function deleteSession(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      'DELETE FROM chat_sessions WHERE id = $1 RETURNING id',
+      [id]
+    );
+
+    if (result.length === 0) {
+      throw createError('Session not found', 404);
+    }
+
+    clearChatSession(id);
+    res.json({ success: true, message: 'Session deleted' });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * List all sessions for a user
+ */
+export async function listSessions(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId = 1 } = req.query;
+
+    const sessions = await query<Session>(
+      'SELECT * FROM chat_sessions WHERE user_id = $1 ORDER BY updated_at DESC',
+      [userId]
+    );
+
+    res.json({ success: true, data: sessions });
+  } catch (error) {
+    next(error);
+  }
+}
+</file>
+
+<file path="services/src/controllers/image-controller.ts">
+import { Request, Response, NextFunction } from 'express';
+import { v4 as uuidv4 } from 'uuid';
+import { query, queryOne } from '../config/db';
+import { generateImage as generateGeminiImage } from '../services/gemini-service';
+import { createError } from '../middleware/error-handler';
+
+interface Image {
+  id: string;
+  session_id: string;
+  prompt: string;
+  image_url: string;
+  storage_path: string;
+  created_at: Date;
+}
+
+/**
+ * Generate image using Gemini 2.0
+ */
+export async function generateImage(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { prompt, sessionId } = req.body;
+
+    if (!prompt) {
+      throw createError('Prompt is required', 400);
+    }
+
+    const id = uuidv4();
+    const image = await generateGeminiImage(prompt);
+
+    if (!image) {
+      throw createError('Failed to generate image', 500);
+    }
+
+    const imageUrl = `data:${image.mimeType};base64,${image.data}`;
+
+    // Save to database
+    await query(
+      `INSERT INTO images (id, session_id, prompt, image_url) VALUES ($1, $2, $3, $4)`,
+      [id, sessionId || null, prompt, imageUrl]
+    );
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id,
+        prompt,
+        imageUrl,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Get image by ID
+ */
+export async function getImage(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+
+    const image = await queryOne<Image>(
+      'SELECT * FROM images WHERE id = $1',
+      [id]
+    );
+
+    if (!image) {
+      throw createError('Image not found', 404);
+    }
+
+    res.json({ success: true, data: image });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * List images for a session
+ */
+export async function listImages(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { sessionId } = req.query;
+
+    let images: Image[];
+    if (sessionId) {
+      images = await query<Image>(
+        'SELECT * FROM images WHERE session_id = $1 ORDER BY created_at DESC',
+        [sessionId]
+      );
+    } else {
+      images = await query<Image>(
+        'SELECT * FROM images ORDER BY created_at DESC LIMIT 50',
+        []
+      );
+    }
+
+    res.json({ success: true, data: images });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Delete image
+ */
+export async function deleteImage(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      'DELETE FROM images WHERE id = $1 RETURNING id',
+      [id]
+    );
+
+    if (result.length === 0) {
+      throw createError('Image not found', 404);
+    }
+
+    res.json({ success: true, message: 'Image deleted' });
+  } catch (error) {
+    next(error);
+  }
+}
+</file>
+
+<file path="services/src/middleware/error-handler.ts">
+import { Request, Response, NextFunction } from 'express';
+
+export interface AppError extends Error {
+  statusCode?: number;
+  isOperational?: boolean;
+}
+
+export function errorHandler(
+  err: AppError,
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const statusCode = err.statusCode || 500;
+  const message = err.message || 'Internal server error';
+
+  console.error(`[Error] ${statusCode}: ${message}`, err.stack);
+
+  res.status(statusCode).json({
+    success: false,
+    error: {
+      message,
+      ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+    },
+  });
+}
+
+export function createError(message: string, statusCode: number): AppError {
+  const error: AppError = new Error(message);
+  error.statusCode = statusCode;
+  error.isOperational = true;
+  return error;
+}
+</file>
+
+<file path="services/src/routes/chat-routes.ts">
+import { Router } from 'express';
+import {
+  createSession,
+  getSession,
+  sendMessageHandler,
+  deleteSession,
+  listSessions,
+} from '../controllers/chat-controller';
+
+export const chatRouter = Router();
+
+// List all sessions
+chatRouter.get('/sessions', listSessions);
+
+// Create new session
+chatRouter.post('/sessions', createSession);
+
+// Get session with messages
+chatRouter.get('/sessions/:id', getSession);
+
+// Send message to session
+chatRouter.post('/sessions/:id/message', sendMessageHandler);
+
+// Delete session
+chatRouter.delete('/sessions/:id', deleteSession);
+</file>
+
+<file path="services/src/routes/image-routes.ts">
+import { Router } from 'express';
+import {
+  generateImage,
+  getImage,
+  listImages,
+  deleteImage,
+} from '../controllers/image-controller';
+
+export const imageRouter = Router();
+
+// Generate image
+imageRouter.post('/generate', generateImage);
+
+// List images
+imageRouter.get('/', listImages);
+
+// Get image by ID
+imageRouter.get('/:id', getImage);
+
+// Delete image
+imageRouter.delete('/:id', deleteImage);
+</file>
+
+<file path="services/src/services/gemini-service.ts">
+import { GoogleGenerativeAI, GenerativeModel, ChatSession } from '@google/generative-ai';
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// Chat model for conversations
+const chatModel: GenerativeModel = genAI.getGenerativeModel({
+  model: 'gemini-1.5-flash'
+});
+
+// Image generation model (Gemini 2.0 with Imagen)
+const imageModel: GenerativeModel = genAI.getGenerativeModel({
+  model: 'gemini-2.0-flash-exp'
+});
+
+// Intent classifier model (fast, cheap)
+const classifierModel: GenerativeModel = genAI.getGenerativeModel({
+  model: 'gemini-1.5-flash'
+});
+
+// Store active chat sessions
+const chatSessions = new Map<string, ChatSession>();
+
+export interface ChatMessage {
+  role: 'user' | 'model';
+  parts: { text: string }[];
+}
+
+export interface StreamChunk {
+  text: string;
+  done: boolean;
+  image?: GeneratedImage;
+}
+
+export interface GeneratedImage {
+  data: string;  // base64 encoded
+  mimeType: string;
+}
+
+export interface ChatResponse {
+  text: string;
+  image?: GeneratedImage;
+}
+
+export interface IntentClassification {
+  shouldGenerateImage: boolean;
+  imagePrompt: string;
+}
+
+const INTENT_CLASSIFIER_PROMPT = `You are an intent classifier for a chatbot that can generate images.
+Analyze the user's message and determine if they want an image to be generated.
+
+Return ONLY valid JSON (no markdown, no code blocks):
+{"shouldGenerateImage": boolean, "imagePrompt": "extracted prompt or empty string"}
+
+Examples of image requests:
+- "Draw me a cat" → {"shouldGenerateImage": true, "imagePrompt": "a cat"}
+- "Can you show me what a dragon looks like?" → {"shouldGenerateImage": true, "imagePrompt": "a dragon"}
+- "I need a logo for my coffee shop" → {"shouldGenerateImage": true, "imagePrompt": "logo for a coffee shop"}
+- "Visualize world peace" → {"shouldGenerateImage": true, "imagePrompt": "world peace concept visualization"}
+- "Create an image of sunset over mountains" → {"shouldGenerateImage": true, "imagePrompt": "sunset over mountains"}
+- "tạo hình con mèo" → {"shouldGenerateImage": true, "imagePrompt": "a cat"}
+- "vẽ cho tôi một bức tranh phong cảnh" → {"shouldGenerateImage": true, "imagePrompt": "landscape painting"}
+
+Examples of NON-image requests:
+- "What is the capital of France?" → {"shouldGenerateImage": false, "imagePrompt": ""}
+- "Help me write code" → {"shouldGenerateImage": false, "imagePrompt": ""}
+- "Tell me about cats" → {"shouldGenerateImage": false, "imagePrompt": ""}
+- "How do I make coffee?" → {"shouldGenerateImage": false, "imagePrompt": ""}
+
+User message: `;
+
+/**
+ * Use Gemini to classify if user wants image generation
+ */
+async function classifyIntent(message: string): Promise<IntentClassification> {
+  try {
+    const result = await classifierModel.generateContent(INTENT_CLASSIFIER_PROMPT + message);
+    const text = result.response.text().trim();
+
+    // Clean potential markdown code blocks
+    const cleanJson = text.replace(/```json\n?|\n?```/g, '').trim();
+
+    const parsed = JSON.parse(cleanJson);
+    return {
+      shouldGenerateImage: Boolean(parsed.shouldGenerateImage),
+      imagePrompt: String(parsed.imagePrompt || message)
+    };
+  } catch (error) {
+    console.error('Intent classification failed:', error);
+    // Fallback: don't generate image if classification fails
+    return { shouldGenerateImage: false, imagePrompt: '' };
+  }
+}
+
+/**
+ * Start or get existing chat session
+ */
+export function getOrCreateChat(sessionId: string, history: ChatMessage[] = []): ChatSession {
+  if (!chatSessions.has(sessionId)) {
+    const chat = chatModel.startChat({ history });
+    chatSessions.set(sessionId, chat);
+  }
+  return chatSessions.get(sessionId)!;
+}
+
+/**
+ * Generate image using Gemini 2.0
+ */
+export async function generateImage(prompt: string): Promise<GeneratedImage | null> {
+  try {
+    const result = await imageModel.generateContent({
+      contents: [{
+        role: 'user',
+        parts: [{ text: `Generate an image: ${prompt}` }]
+      }],
+      generationConfig: {
+        responseModalities: ['TEXT', 'IMAGE'] as any
+      }
+    } as any);
+
+    const response = result.response;
+    const parts = response.candidates?.[0]?.content?.parts || [];
+
+    for (const part of parts) {
+      if ((part as any).inlineData) {
+        return {
+          data: (part as any).inlineData.data,
+          mimeType: (part as any).inlineData.mimeType || 'image/png'
+        };
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('Image generation failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Send message with AI-powered image detection
+ */
+export async function sendMessageWithImage(
+  sessionId: string,
+  message: string,
+  history: ChatMessage[] = []
+): Promise<ChatResponse> {
+  const chat = getOrCreateChat(sessionId, history);
+
+  // Use Gemini to classify intent
+  const intent = await classifyIntent(message);
+
+  if (intent.shouldGenerateImage) {
+    const image = await generateImage(intent.imagePrompt);
+
+    // Get text response
+    const textResult = await chat.sendMessage(
+      image
+        ? `User asked: "${message}". I generated an image of "${intent.imagePrompt}". Briefly describe what was created in a friendly way.`
+        : `User asked: "${message}" but image generation failed. Explain that the image couldn't be generated and describe what it would look like.`
+    );
+
+    return {
+      text: textResult.response.text(),
+      image: image || undefined
+    };
+  }
+
+  // Regular text chat
+  const result = await chat.sendMessage(message);
+  return { text: result.response.text() };
+}
+
+/**
+ * Send message and get streaming response with AI-powered image detection
+ */
+export async function* sendMessageStream(
+  sessionId: string,
+  message: string,
+  history: ChatMessage[] = []
+): AsyncGenerator<StreamChunk> {
+  const chat = getOrCreateChat(sessionId, history);
+
+  // Use Gemini to classify intent
+  const intent = await classifyIntent(message);
+
+  if (intent.shouldGenerateImage) {
+    // Generate image first
+    const image = await generateImage(intent.imagePrompt);
+
+    // Send image chunk if generated
+    if (image) {
+      yield { text: '', done: false, image };
+    }
+
+    // Stream text description
+    const textPrompt = image
+      ? `User asked: "${message}". I generated an image of "${intent.imagePrompt}". Briefly describe what was created in a friendly way.`
+      : `User asked: "${message}" but image generation failed. Explain that you couldn't generate the image and describe what it would look like.`;
+
+    const result = await chat.sendMessageStream(textPrompt);
+    for await (const chunk of result.stream) {
+      const text = chunk.text();
+      yield { text, done: false };
+    }
+    yield { text: '', done: true };
+    return;
+  }
+
+  // Regular streaming
+  const result = await chat.sendMessageStream(message);
+  for await (const chunk of result.stream) {
+    const text = chunk.text();
+    yield { text, done: false };
+  }
+  yield { text: '', done: true };
+}
+
+/**
+ * Send message and get full response (non-streaming)
+ */
+export async function sendMessage(
+  sessionId: string,
+  message: string,
+  history: ChatMessage[] = []
+): Promise<string> {
+  const response = await sendMessageWithImage(sessionId, message, history);
+  return response.text;
+}
+
+/**
+ * Clear chat session from memory
+ */
+export function clearChatSession(sessionId: string): void {
+  chatSessions.delete(sessionId);
+}
+</file>
+
+<file path="services/src/server.ts">
+import express from 'express';
+import cors from 'cors';
+import morgan from 'morgan';
+import dotenv from 'dotenv';
+import { chatRouter } from './routes/chat-routes';
+import { imageRouter } from './routes/image-routes';
+import { errorHandler } from './middleware/error-handler';
+import { initDb } from './config/db';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(morgan('dev'));
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Routes
+app.use('/api/chat', chatRouter);
+app.use('/api/images', imageRouter);
+
+// Error handler
+app.use(errorHandler);
+
+// Start server
+async function start() {
+  try {
+    await initDb();
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+start();
+</file>
+
+<file path="services/Dockerfile">
+# Stage 1: Build
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+# Stage 2: Runtime
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/node_modules ./node_modules
+COPY . .
+EXPOSE 3000
+USER node
+CMD ["npm", "start"]
+</file>
+
+<file path="services/package.json">
+{
+  "name": "api-portal-backend",
+  "version": "1.0.0",
+  "description": "Gemini chatbot backend API",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "nodemon --watch src --ext ts --exec ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "joi": "^17.11.0",
+    "morgan": "^1.10.0",
+    "pg": "^8.11.3",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/morgan": "^1.9.9",
+    "@types/node": "^20.10.0",
+    "@types/pg": "^8.10.9",
+    "@types/uuid": "^9.0.7",
+    "nodemon": "^3.0.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
+</file>
+
+<file path=".env.example">
+NODE_ENV=development
+DB_USER=postgres
+DB_PASSWORD=postgres
+DB_NAME=chat_db
+GEMINI_API_KEY=your_gemini_api_key_here
+</file>
+
+<file path="README.md">
+# API Portal
+
+Gemini-powered chatbot API with chat and image generation capabilities.
+
+## Quick Start
+
+```bash
+cp .env.example .env
+# Add GEMINI_API_KEY to .env
+docker-compose up --build
+```
+
+Server: http://localhost:3000
+
+See [docs/README.md](docs/README.md) for full documentation.
+</file>
+
+</files>

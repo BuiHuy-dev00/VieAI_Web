@@ -1,0 +1,35 @@
+{
+  "entryFile": "src/server.ts",
+  "noImplicitAdditionalProperties": "throw-on-extras",
+  "controllerPathGlobs": ["src/controllers/**/*-controller.ts"],
+  "spec": {
+    "outputDirectory": "src/generated",
+    "specVersion": 3,
+    "securityDefinitions": {
+      "jwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT access token from /api/auth/login or /api/auth/google"
+      },
+      "jwt_admin": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Same JWT; user must have is_admin = true"
+      }
+    },
+    "tags": [
+      { "name": "Auth", "description": "Authentication endpoints" },
+      { "name": "Admin", "description": "Quản trị người dùng (admin only)" },
+      { "name": "Chat", "description": "Chat session management" },
+      { "name": "Images", "description": "Image generation" },
+      { "name": "Payments", "description": "SePay / VietQR checkout" }
+    ]
+  },
+  "routes": {
+    "routesDir": "src/generated",
+    "middleware": "express",
+    "authenticationModule": "src/middleware/tsoa-auth.ts"
+  }
+}

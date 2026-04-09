@@ -1,0 +1,128 @@
+{
+  "paths": {
+    "/api/chat/sessions/{id}/message": {
+      "post": {
+        "operationId": "SendMessage",
+        "summary": "Send a message to a chat session (SSE streaming)",
+        "description": "Gửi tin tới OpenAI (GPT). SSE stream văn bản. Hỗ trợ ảnh đính kèm (vision). Lưu toàn bộ vào DB theo session.",
+        "tags": ["Chat"],
+        "security": [{ "jwt": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Chat session ID",
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream or JSON response",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "SSE: {type:'text',text,done} | {type:'done',done:true}"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Message is required",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SendMessageRequest": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Nội dung (không giới hạn độ dài); có thể bỏ trống nếu có images"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["mimeType", "data"],
+              "properties": {
+                "mimeType": { "type": "string" },
+                "data": { "type": "string", "description": "Base64 (có thể kèm data URL)" }
+              }
+            }
+          },
+          "stream": {
+            "type": "boolean",
+            "default": true,
+            "description": "SSE streaming"
+          }
+        }
+      },
+      "SendMessageResponse": {
+        "type": "object",
+        "properties": {
+          "success": { "type": "boolean" },
+          "data": {
+            "type": "object",
+            "properties": {
+              "response": {
+                "type": "string",
+                "description": "AI response text"
+              },
+              "imageId": {
+                "type": "string",
+                "description": "Generated image ID (if applicable)"
+              },
+              "imageUrl": {
+                "type": "string",
+                "description": "Generated image data URL (if applicable)"
+              }
+            },
+            "required": ["response"]
+          }
+        },
+        "required": ["success", "data"]
+      }
+    }
+  }
+}
