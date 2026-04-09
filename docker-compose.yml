@@ -16,9 +16,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
-  env_file:
+    env_file:
       - services/.env
-      - .env
     environment:
       NODE_ENV: production
       DB_HOST: db

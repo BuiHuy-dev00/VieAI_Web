@@ -28,8 +28,10 @@ type AuthSuccess = {
 type RefreshResponse = { accessToken: string; refreshToken: string };
 type ApiErrorBody = { success?: false; error?: { message?: string }; message?: string };
 
-function apiErrorMessage(json: ApiErrorBody | null, fallback: string): string {
-    return json?.error?.message ?? json?.message ?? fallback;
+function apiErrorMessage(json: unknown, fallback: string): string {
+    if (json == null || typeof json !== "object") return fallback;
+    const body = json as ApiErrorBody;
+    return body.error?.message ?? body.message ?? fallback;
 }
 
 type AuthContextValue = {
